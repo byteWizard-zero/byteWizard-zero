@@ -9,9 +9,33 @@ import hashlib
 # Fine-grained personal access token with All Repositories access:
 # Account permissions: read:Followers, read:Starring, read:Watching
 # Repository permissions: read:Commit statuses, read:Contents, read:Issues, read:Metadata, read:Pull Requests
-HEADERS = {'authorization': 'token '+ os.environ['ACCESS_TOKEN']}
-USER_NAME = os.environ['USER_NAME'] # 'byteWizard-zero'
+import tempfile
+
+ACCESS_TOKEN = os.environ.get('ACCESS_TOKEN', '')
+USER_NAME = os.environ.get('USER_NAME', 'byteWizard-zero')
+HEADERS = {'authorization': f'token {ACCESS_TOKEN}'} if ACCESS_TOKEN else {}
 QUERY_COUNT = {'user_getter': 0, 'follower_getter': 0, 'graph_repos_stars': 0, 'recursive_loc': 0, 'graph_commits': 0, 'loc_query': 0}
+
+def get_cache_dir():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    local_cache = os.path.join(base_dir, 'cache')
+    try:
+        os.makedirs(local_cache, exist_ok=True)
+        test_file = os.path.join(local_cache, '.perm_test')
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        return local_cache
+    except Exception:
+        tmp_cache = os.path.join(tempfile.gettempdir(), 'cache')
+        os.makedirs(tmp_cache, exist_ok=True)
+        return tmp_cache
+
+def get_cache_filename(username):
+    cache_dir = get_cache_dir()
+    user_hash = hashlib.sha256(username.encode('utf-8')).hexdigest()
+    return os.path.join(cache_dir, f"{user_hash}.txt")
+
 
 
 def daily_readme(birthday):
@@ -229,7 +253,7 @@ def cache_builder(edges, comment_size, force_cache, loc_add=0, loc_del=0):
     If it has, run recursive_loc on that repository to update the LOC count
     """
     cached = True # Assume all repositories are cached
-    filename = 'cache/'+hashlib.sha256(USER_NAME.encode('utf-8')).hexdigest()+'.txt' # Create a unique filename for each user
+    filename = get_cache_filename(USER_NAME)
     try:
         with open(filename, 'r') as f:
             data = f.readlines()
@@ -289,7 +313,7 @@ def force_close_file(data, cache_comment):
     Forces the file to close, preserving whatever data was written to it
     This is needed because if this function is called, the program would've crashed before the file is properly saved and closed
     """
-    filename = 'cache/'+hashlib.sha256(USER_NAME.encode('utf-8')).hexdigest()+'.txt'
+    filename = get_cache_filename(USER_NAME)
     with open(filename, 'w') as f:
         f.writelines(cache_comment)
         f.writelines(data)
@@ -305,13 +329,13 @@ def stars_counter(data):
     return total_stars
 
 
-def svg_overwrite(filename, age_data, commit_data, star_data, repo_data, contrib_data, follower_data, loc_data):
+def get_svg_content(filename, age_data, commit_data, star_data, repo_data, contrib_data, follower_data, loc_data):
     """
-    Parse SVG files and update elements with my age, commits, stars, repositories, and lines written
+    Parse SVG file and return XML string with updated elements.
     """
     tree = etree.parse(filename)
     root = tree.getroot()
-    justify_format(root, 'age_data', age_data, 49) # Now correctly updates and justifies age_data!
+    justify_format(root, 'age_data', age_data, 49)
     justify_format(root, 'commit_data', commit_data, 22)
     justify_format(root, 'star_data', star_data, 14)
     justify_format(root, 'repo_data', repo_data, 6)
@@ -320,7 +344,52 @@ def svg_overwrite(filename, age_data, commit_data, star_data, repo_data, contrib
     justify_format(root, 'loc_data', loc_data[2], 9)
     justify_format(root, 'loc_add', loc_data[0])
     justify_format(root, 'loc_del', loc_data[1], 7)
-    tree.write(filename, encoding='utf-8', xml_declaration=True)
+    return etree.tostring(root, encoding='utf-8', xml_declaration=True).decode('utf-8')
+
+
+def svg_overwrite(filename, age_data, commit_data, star_data, repo_data, contrib_data, follower_data, loc_data):
+    """
+    Parse SVG files and update elements with my age, commits, stars, repositories, and lines written
+    """
+    content = get_svg_content(filename, age_data, commit_data, star_data, repo_data, contrib_data, follower_data, loc_data)
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+
+def generate_svg_string(theme='dark', user_name=None, access_token=None):
+    """
+    Generates and returns dynamic SVG XML string for serverless API endpoints.
+    """
+    global USER_NAME, HEADERS, OWNER_ID
+    if user_name:
+        USER_NAME = user_name
+    token = access_token or os.environ.get('ACCESS_TOKEN')
+    if token:
+        HEADERS = {'authorization': f'token {token}'}
+
+    user_data, _ = perf_counter(user_getter, USER_NAME)
+    OWNER_ID, acc_date = user_data
+
+    try:
+        birthday = datetime.datetime.strptime(acc_date, "%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        birthday = datetime.datetime(2007, 4, 6, 0, 1, 44)
+
+    age_data, _ = perf_counter(daily_readme, birthday)
+    total_loc, _ = perf_counter(loc_query, ['OWNER', 'COLLABORATOR', 'ORGANIZATION_MEMBER'], 7)
+    commit_data, _ = perf_counter(commit_counter, 7)
+    star_data, _ = perf_counter(graph_repos_stars, 'stars', ['OWNER'])
+    repo_data, _ = perf_counter(graph_repos_stars, 'repos', ['OWNER'])
+    contrib_data, _ = perf_counter(graph_repos_stars, 'repos', ['OWNER', 'COLLABORATOR', 'ORGANIZATION_MEMBER'])
+    follower_data, _ = perf_counter(follower_getter, USER_NAME)
+
+    for index in range(len(total_loc) - 1):
+        total_loc[index] = '{:,}'.format(total_loc[index])
+
+    filename = f"{theme}_mode.svg"
+    svg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    return get_svg_content(svg_path, age_data, commit_data, star_data, repo_data, contrib_data, follower_data, total_loc[:-1])
+
 
 
 def justify_format(root, element_id, new_text, length=0):
@@ -356,7 +425,7 @@ def commit_counter(comment_size):
     Counts up my total commits, using the cache file created by cache_builder.
     """
     total_commits = 0
-    filename = 'cache/'+hashlib.sha256(USER_NAME.encode('utf-8')).hexdigest()+'.txt' # Use the same filename as cache_builder
+    filename = get_cache_filename(USER_NAME)
     with open(filename, 'r') as f:
         data = f.readlines()
     cache_comment = data[:comment_size] # save the comment block
