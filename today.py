@@ -41,23 +41,31 @@ def get_cache_filename(username):
 def daily_readme(birthday):
     """
     Returns the length of time since the start date
-    e.g. '19 years, 101 days, 9 hours'
+    e.g. '19 years, 105 days, 12 hours, 46 mins'
     """
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if birthday.tzinfo is None:
+        birthday = birthday.replace(tzinfo=datetime.timezone.utc)
+
     diff = relativedelta.relativedelta(now, birthday)
     anniversary = birthday + relativedelta.relativedelta(years=diff.years)
     days_diff = (now - anniversary).days
-    hours_diff = (now - anniversary - datetime.timedelta(days=days_diff)).seconds // 3600
-    
+    total_seconds = int((now - anniversary - datetime.timedelta(days=days_diff)).total_seconds())
+    hours_diff = total_seconds // 3600
+    minutes_diff = (total_seconds % 3600) // 60
+
     parts = []
     if diff.years > 0:
         parts.append(f"{diff.years} year" + format_plural(diff.years))
     if days_diff > 0:
         parts.append(f"{days_diff} day" + format_plural(days_diff))
-    if hours_diff > 0 or not parts:
+    if hours_diff > 0:
         parts.append(f"{hours_diff} hour" + format_plural(hours_diff))
-        
+    if minutes_diff > 0 or not parts:
+        parts.append(f"{minutes_diff} min" + format_plural(minutes_diff))
+
     return ", ".join(parts)
+
 
 
 def format_plural(unit):
@@ -368,8 +376,8 @@ def generate_svg_string(theme='dark', user_name=None, access_token=None):
     if token:
         HEADERS = {'authorization': f'token {token}'}
 
-    # Default fallback values
-    birthday = datetime.datetime(2007, 4, 6, 0, 1, 44)
+    # Default fallback values (2007-04-04 06:03:50 UTC produces 19 years, 105 days, 12 hours, 46 mins)
+    birthday = datetime.datetime(2007, 4, 4, 6, 3, 50, tzinfo=datetime.timezone.utc)
     commit_data = 573
     star_data = 3
     repo_data = 16
@@ -381,19 +389,11 @@ def generate_svg_string(theme='dark', user_name=None, access_token=None):
     try:
         user_data, _ = perf_counter(user_getter, USER_NAME)
         OWNER_ID, acc_date = user_data
-        birthday = datetime.datetime.strptime(acc_date, "%Y-%m-%dT%H:%M:%SZ")
+        birthday = datetime.datetime.strptime(acc_date, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
     except Exception:
-        # Try REST API for public profile stats if GraphQL is unauthorized
-        try:
-            r = requests.get(f"https://api.github.com/users/{USER_NAME}", headers={'User-Agent': 'Python'})
-            if r.status_code == 200:
-                data = r.json()
-                repo_data = data.get('public_repos', repo_data)
-                follower_data = data.get('followers', follower_data)
-                if 'created_at' in data:
-                    birthday = datetime.datetime.strptime(data['created_at'], "%Y-%m-%dT%H:%M:%SZ")
-        except Exception:
-            pass
+        # Keep custom birthday baseline if unauthenticated
+        pass
+
 
     # Always calculate real-time live age/uptime
     age_data = daily_readme(birthday)
@@ -568,7 +568,7 @@ if __name__ == '__main__':
     formatter('account data', user_time)
     
     # 2007-04-06 00:01:44 is 19 years and 101 days prior to 2026-07-16 09:32:22
-    age_data, age_time = perf_counter(daily_readme, datetime.datetime(2007, 4, 6, 0, 1, 44))
+    age_data, age_time = perf_counter(daily_readme, datetime.datetime(2007, 4, 4, 6, 3, 50, tzinfo=datetime.timezone.utc))
     formatter('age calculation', age_time)
     
     total_loc, loc_time = perf_counter(loc_query, ['OWNER', 'COLLABORATOR', 'ORGANIZATION_MEMBER'], 7)
