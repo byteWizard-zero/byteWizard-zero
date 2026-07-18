@@ -50,7 +50,10 @@ class handler(BaseHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/svg+xml; charset=utf-8')
-        # Cache-Control: max-age=0, s-maxage=60, stale-while-revalidate=300 for GitHub proxy compatibility
-        self.send_header('Cache-Control', 'max-age=0, s-maxage=60, stale-while-revalidate=300')
+        # Instruct GitHub Camo proxy and browsers never to cache the SVG image
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0, s-maxage=0')
+        self.send_header('Pragma', 'no-cache')
+        self.send_header('Expires', '0')
         self.end_headers()
         self.wfile.write(svg_content.encode('utf-8'))
+
