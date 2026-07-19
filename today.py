@@ -376,8 +376,8 @@ def generate_svg_string(theme='dark', user_name=None, access_token=None):
     if token:
         HEADERS = {'authorization': f'token {token}'}
 
-    # Default fallback values (2007-04-04 06:03:50 UTC produces 19 years, 105 days, 12 hours, 46 mins)
-    birthday = datetime.datetime(2007, 4, 4, 6, 3, 50, tzinfo=datetime.timezone.utc)
+    # Time spent on Planet Earth baseline (2007-04-01 15:00:00 UTC)
+    birthday = datetime.datetime(2007, 4, 1, 15, 0, 0, tzinfo=datetime.timezone.utc)
     commit_data = 573
     star_data = 3
     repo_data = 16
@@ -385,14 +385,13 @@ def generate_svg_string(theme='dark', user_name=None, access_token=None):
     follower_data = 1
     total_loc = [420963, 275133, 145830]
 
-    # Try GraphQL account query
+    # Try GraphQL account query to initialize OWNER_ID if token present
     try:
         user_data, _ = perf_counter(user_getter, USER_NAME)
-        OWNER_ID, acc_date = user_data
-        birthday = datetime.datetime.strptime(acc_date, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+        OWNER_ID, _ = user_data
     except Exception:
-        # Keep custom birthday baseline if unauthenticated
         pass
+
 
 
     # Always calculate real-time live age/uptime
@@ -568,7 +567,7 @@ if __name__ == '__main__':
     formatter('account data', user_time)
     
     # 2007-04-06 00:01:44 is 19 years and 101 days prior to 2026-07-16 09:32:22
-    age_data, age_time = perf_counter(daily_readme, datetime.datetime(2007, 4, 4, 6, 3, 50, tzinfo=datetime.timezone.utc))
+    age_data, age_time = perf_counter(daily_readme, datetime.datetime(2007, 4, 1, 15, 0, 0, tzinfo=datetime.timezone.utc))
     formatter('age calculation', age_time)
     
     total_loc, loc_time = perf_counter(loc_query, ['OWNER', 'COLLABORATOR', 'ORGANIZATION_MEMBER'], 7)
