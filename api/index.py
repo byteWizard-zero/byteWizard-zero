@@ -15,15 +15,26 @@ except Exception as e:
     import_error = str(e)
 
 
+def create_fallback_svg(theme='dark', message="Yo! Rendering issues you know, please keep refreshing to see the full picture!"):
+    bg_color = "#161b22" if theme == 'dark' else "#ffffff"
+    text_color = "#ffa657" if theme == 'dark' else "#d97706"
+    sub_color = "#a5d6ff" if theme == 'dark' else "#0969da"
+    border_color = "#30363d" if theme == 'dark' else "#d0d7de"
+
+    return f'''<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080px" height="180px" viewBox="0 0 1080 180">
+  <rect width="1080" height="180" fill="{bg_color}" rx="15" stroke="{border_color}" stroke-width="2"/>
+  <text x="540" y="80" fill="{text_color}" font-family="Consolas, monospace" font-size="20px" font-weight="bold" text-anchor="middle">
+    ⚠️ {message}
+  </text>
+  <text x="540" y="120" fill="{sub_color}" font-family="Consolas, monospace" font-size="14px" text-anchor="middle">
+    [ Status: Dynamic rendering temporarily unavailable • Click refresh or try again in a few seconds ]
+  </text>
+</svg>'''
+
+
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if generate_svg_string is None:
-            self.send_response(500)
-            self.send_header('Content-Type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(f"Server initialization error: {import_error}".encode('utf-8'))
-            return
-
         parsed_path = urlparse(self.path)
         params = parse_qs(parsed_path.query)
 
@@ -33,20 +44,22 @@ class handler(BaseHTTPRequestHandler):
 
         user_name = params.get('user', [None])[0]
 
-        try:
-            svg_content = generate_svg_string(theme=theme, user_name=user_name)
-        except Exception as e:
-            # Fallback to pre-generated static SVG if API rate limit or error occurs
-            svg_file = os.path.join(base_dir, f"{theme}_mode.svg")
-            if os.path.exists(svg_file):
-                with open(svg_file, 'r', encoding='utf-8') as f:
-                    svg_content = f.read()
-            else:
-                self.send_response(500)
-                self.send_header('Content-Type', 'text/plain')
-                self.end_headers()
-                self.wfile.write(f"Error generating SVG: {str(e)}".encode('utf-8'))
-                return
+        if generate_svg_string is None:
+            svg_content = create_fallback_svg(theme=theme)
+        else:
+            try:
+                svg_content = generate_svg_string(theme=theme, user_name=user_name)
+            except Exception:
+                # Fallback to pre-generated static SVG or custom fallback card
+                svg_file = os.path.join(base_dir, f"{theme}_mode.svg")
+                if os.path.exists(svg_file):
+                    try:
+                        with open(svg_file, 'r', encoding='utf-8') as f:
+                            svg_content = f.read()
+                    except Exception:
+                        svg_content = create_fallback_svg(theme=theme)
+                else:
+                    svg_content = create_fallback_svg(theme=theme)
 
         self.send_response(200)
         self.send_header('Content-Type', 'image/svg+xml; charset=utf-8')
@@ -56,4 +69,3 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Expires', '0')
         self.end_headers()
         self.wfile.write(svg_content.encode('utf-8'))
-
