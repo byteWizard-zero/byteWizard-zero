@@ -52,12 +52,11 @@ jobs:
           if [ -n "$(git status --porcelain)" ]; then
             git commit -m "Updated README [skip ci]"
             if [ -n "$ACCESS_TOKEN" ]; then
-              git push "https://x-access-token:${ACCESS_TOKEN}@github.com/${{ github.repository }}.git" HEAD:${{ github.ref_name }}
+              git push "https://x-access-token:${ACCESS_TOKEN}@github.com/${{ github.repository }}.git" HEAD:${{ github.ref_name }} || echo "::warning::Skipping push because token-based push failed"
             else
-              git push origin HEAD:${{ github.ref_name }}
+              git push origin HEAD:${{ github.ref_name }} || echo "::warning::Skipping push because origin push failed"
             fi
           else
             echo "No changes to commit"
           fi
-
 
