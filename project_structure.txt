@@ -1,0 +1,10 @@
+Project Structure:
+- project
+  - src
+    - main.py
+    - utils.py
+  - tests
+    - test_main.py
+    - test_utils.py
+  - README.md
+  - requirements.txt

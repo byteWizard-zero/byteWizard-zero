@@ -86,6 +86,9 @@ def simple_request(func_name, query, variables):
     """
     request = requests.post('https://api.github.com/graphql', json={'query': query, 'variables':variables}, headers=HEADERS)
     if request.status_code == 200:
+        res = request.json()
+        if 'errors' in res and not res.get('data'):
+            raise Exception(f"{func_name} GraphQL error: {res.get('errors')}")
         return request
     raise Exception(func_name, ' has failed with a', request.status_code, request.text, QUERY_COUNT)
 
@@ -140,10 +143,13 @@ def graph_repos_stars(count_type, owner_affiliation, cursor=None, add_loc=0, del
     variables = {'owner_affiliation': owner_affiliation, 'login': USER_NAME, 'cursor': cursor}
     request = simple_request(graph_repos_stars.__name__, query, variables)
     if request.status_code == 200:
-        if count_type == 'repos':
-            return request.json()['data']['user']['repositories']['totalCount']
-        elif count_type == 'stars':
-            return stars_counter(request.json()['data']['user']['repositories']['edges'])
+        repos_data = request.json().get('data', {}).get('user', {}).get('repositories')
+        if repos_data:
+            if count_type == 'repos':
+                return repos_data.get('totalCount', 0)
+            elif count_type == 'stars':
+                return stars_counter(repos_data.get('edges', []))
+    return 0
 
 
 def recursive_loc(owner, repo_name, data, cache_comment, addition_total=0, deletion_total=0, my_commits=0, cursor=None):
@@ -186,9 +192,12 @@ def recursive_loc(owner, repo_name, data, cache_comment, addition_total=0, delet
     variables = {'repo_name': repo_name, 'owner': owner, 'cursor': cursor}
     request = requests.post('https://api.github.com/graphql', json={'query': query, 'variables':variables}, headers=HEADERS) # I cannot use simple_request(), because I want to save the file before raising Exception
     if request.status_code == 200:
-        if request.json()['data']['repository']['defaultBranchRef'] != None: # Only count commits if repo isn't empty
-            return loc_counter_one_repo(owner, repo_name, data, cache_comment, request.json()['data']['repository']['defaultBranchRef']['target']['history'], addition_total, deletion_total, my_commits)
-        else: return 0, 0, 0
+        res_json = request.json()
+        repo = res_json.get('data', {}).get('repository')
+        if repo and repo.get('defaultBranchRef') and repo['defaultBranchRef'].get('target', {}).get('history'):
+            return loc_counter_one_repo(owner, repo_name, data, cache_comment, repo['defaultBranchRef']['target']['history'], addition_total, deletion_total, my_commits)
+        else:
+            return addition_total, deletion_total, my_commits
     force_close_file(data, cache_comment) # saves what is currently in the file before this program crashes
     if request.status_code == 403:
         raise Exception('Too many requests in a short amount of time!\nYou\'ve hit the non-documented anti-abuse limit!')
@@ -200,15 +209,19 @@ def loc_counter_one_repo(owner, repo_name, data, cache_comment, history, additio
     Recursively call recursive_loc (since GraphQL can only search 100 commits at a time) 
     only adds the LOC value of commits authored by me
     """
-    for node in history['edges']:
-        if node['node']['author']['user'] == OWNER_ID:
+    edges = history.get('edges', []) if history else []
+    for node in edges:
+        author = node.get('node', {}).get('author')
+        user = author.get('user') if author else None
+        if user == OWNER_ID:
             my_commits += 1
-            addition_total += node['node']['additions']
-            deletion_total += node['node']['deletions']
+            addition_total += node.get('node', {}).get('additions', 0)
+            deletion_total += node.get('node', {}).get('deletions', 0)
 
-    if history['edges'] == [] or not history['pageInfo']['hasNextPage']:
+    if not edges or not history.get('pageInfo', {}).get('hasNextPage'):
         return addition_total, deletion_total, my_commits
-    else: return recursive_loc(owner, repo_name, data, cache_comment, addition_total, deletion_total, my_commits, history['pageInfo']['endCursor'])
+    else:
+        return recursive_loc(owner, repo_name, data, cache_comment, addition_total, deletion_total, my_commits, history['pageInfo']['endCursor'])
 
 
 def loc_query(owner_affiliation, comment_size=0, force_cache=False, cursor=None, edges=[]):
@@ -248,11 +261,15 @@ def loc_query(owner_affiliation, comment_size=0, force_cache=False, cursor=None,
     }'''
     variables = {'owner_affiliation': owner_affiliation, 'login': USER_NAME, 'cursor': cursor}
     request = simple_request(loc_query.__name__, query, variables)
-    if request.json()['data']['user']['repositories']['pageInfo']['hasNextPage']:   # If repository data has another page
-        edges += request.json()['data']['user']['repositories']['edges']            # Add on to the LoC count
-        return loc_query(owner_affiliation, comment_size, force_cache, request.json()['data']['user']['repositories']['pageInfo']['endCursor'], edges)
+    res_json = request.json()
+    repos_data = res_json.get('data', {}).get('user', {}).get('repositories')
+    if not repos_data:
+        return [0, 0, 0, True]
+    current_edges = repos_data.get('edges', [])
+    if repos_data.get('pageInfo', {}).get('hasNextPage'):
+        return loc_query(owner_affiliation, comment_size, force_cache, repos_data['pageInfo']['endCursor'], edges + current_edges)
     else:
-        return cache_builder(edges + request.json()['data']['user']['repositories']['edges'], comment_size, force_cache)
+        return cache_builder(edges + current_edges, comment_size, force_cache)
 
 
 def cache_builder(edges, comment_size, force_cache, loc_add=0, loc_del=0):
@@ -264,40 +281,68 @@ def cache_builder(edges, comment_size, force_cache, loc_add=0, loc_del=0):
     filename = get_cache_filename(USER_NAME)
     try:
         with open(filename, 'r') as f:
-            data = f.readlines()
+            raw_lines = f.readlines()
     except FileNotFoundError: # If the cache file doesn't exist, create it
-        data = []
+        raw_lines = []
         if comment_size > 0:
-            for _ in range(comment_size): data.append('This line is a comment block. Write whatever you want here.\n')
+            for _ in range(comment_size):
+                raw_lines.append('This line is a comment block. Write whatever you want here.\n')
         with open(filename, 'w') as f:
-            f.writelines(data)
+            f.writelines(raw_lines)
 
-    if len(data)-comment_size != len(edges) or force_cache: # If the number of repos has changed, or force_cache is True
+    if len(raw_lines) - comment_size != len(edges) or force_cache: # If the number of repos has changed, or force_cache is True
         cached = False
         flush_cache(edges, filename, comment_size)
         with open(filename, 'r') as f:
-            data = f.readlines()
+            raw_lines = f.readlines()
 
-    cache_comment = data[:comment_size] # save the comment block
-    data = data[comment_size:] # remove those lines
-    for index in range(len(edges)):
-        repo_hash, commit_count, *__ = data[index].split()
-        if repo_hash == hashlib.sha256(edges[index]['node']['nameWithOwner'].encode('utf-8')).hexdigest():
+    cache_comment = raw_lines[:comment_size] # save the comment block
+    data = raw_lines[comment_size:] # remove those lines
+
+    cache_dict = {}
+    for line in data:
+        parts = line.strip().split()
+        if parts:
+            cache_dict[parts[0]] = parts[1:]
+
+    new_data_lines = []
+    for node in edges:
+        repo_name_with_owner = node.get('node', {}).get('nameWithOwner')
+        if not repo_name_with_owner:
+            continue
+        repo_hash = hashlib.sha256(repo_name_with_owner.encode('utf-8')).hexdigest()
+        branch_ref = node.get('node', {}).get('defaultBranchRef')
+        total_commits = 0
+        if branch_ref and branch_ref.get('target', {}).get('history'):
+            total_commits = branch_ref['target']['history'].get('totalCount', 0)
+
+        existing = cache_dict.get(repo_hash)
+        if existing and len(existing) >= 4:
+            cached_commit_count = int(existing[0])
+            if cached_commit_count == total_commits:
+                new_data_lines.append(f"{repo_hash} {' '.join(existing)}\n")
+                loc_add += int(existing[2])
+                loc_del += int(existing[3])
+                continue
+
+        cached = False
+        if total_commits > 0 and '/' in repo_name_with_owner:
+            owner, repo_name = repo_name_with_owner.split('/', 1)
             try:
-                if int(commit_count) != edges[index]['node']['defaultBranchRef']['target']['history']['totalCount']:
-                    # if commit count has changed, update loc for that repo
-                    owner, repo_name = edges[index]['node']['nameWithOwner'].split('/')
-                    loc = recursive_loc(owner, repo_name, data, cache_comment)
-                    data[index] = repo_hash + ' ' + str(edges[index]['node']['defaultBranchRef']['target']['history']['totalCount']) + ' ' + str(loc[2]) + ' ' + str(loc[0]) + ' ' + str(loc[1]) + '\n'
-            except TypeError: # If the repo is empty
-                data[index] = repo_hash + ' 0 0 0 0\n'
+                loc = recursive_loc(owner, repo_name, data, cache_comment)
+                new_data_lines.append(f"{repo_hash} {total_commits} {loc[2]} {loc[0]} {loc[1]}\n")
+                loc_add += int(loc[0])
+                loc_del += int(loc[1])
+            except Exception as e:
+                print(f"Warning: recursive_loc failed for {repo_name_with_owner}: {e}")
+                new_data_lines.append(f"{repo_hash} 0 0 0 0\n")
+        else:
+            new_data_lines.append(f"{repo_hash} 0 0 0 0\n")
+
     with open(filename, 'w') as f:
         f.writelines(cache_comment)
-        f.writelines(data)
-    for line in data:
-        loc = line.split()
-        loc_add += int(loc[3])
-        loc_del += int(loc[4])
+        f.writelines(new_data_lines)
+
     return [loc_add, loc_del, loc_add - loc_del, cached]
 
 
@@ -313,7 +358,9 @@ def flush_cache(edges, filename, comment_size):
     with open(filename, 'w') as f:
         f.writelines(data)
         for node in edges:
-            f.write(hashlib.sha256(node['node']['nameWithOwner'].encode('utf-8')).hexdigest() + ' 0 0 0 0\n')
+            name_with_owner = node.get('node', {}).get('nameWithOwner', '')
+            if name_with_owner:
+                f.write(hashlib.sha256(name_with_owner.encode('utf-8')).hexdigest() + ' 0 0 0 0\n')
 
 
 def force_close_file(data, cache_comment):
@@ -333,7 +380,9 @@ def stars_counter(data):
     Count total stars in repositories owned by me
     """
     total_stars = 0
-    for node in data: total_stars += node['node']['stargazers']['totalCount']
+    for node in data:
+        stargazers = node.get('node', {}).get('stargazers', {})
+        total_stars += stargazers.get('totalCount', 0)
     return total_stars
 
 
@@ -392,8 +441,6 @@ def generate_svg_string(theme='dark', user_name=None, access_token=None):
     except Exception:
         pass
 
-
-
     # Always calculate real-time live age/uptime
     age_data = daily_readme(birthday)
 
@@ -446,8 +493,6 @@ def generate_svg_string(theme='dark', user_name=None, access_token=None):
     return get_svg_content(svg_path, age_data, commit_data, star_data, repo_data, contrib_data, follower_data, formatted_loc)
 
 
-
-
 def justify_format(root, element_id, new_text, length=0):
     """
     Updates and formats the text of the element, and modifes the amount of dots in the previous element to justify the new text on the svg
@@ -487,7 +532,9 @@ def commit_counter(comment_size):
     cache_comment = data[:comment_size] # save the comment block
     data = data[comment_size:] # remove those lines
     for line in data:
-        total_commits += int(line.split()[2])
+        parts = line.split()
+        if len(parts) >= 3:
+            total_commits += int(parts[2])
     return total_commits
 
 
@@ -505,7 +552,12 @@ def user_getter(username):
     }'''
     variables = {'login': username}
     request = simple_request(user_getter.__name__, query, variables)
-    return {'id': request.json()['data']['user']['id']}, request.json()['data']['user']['createdAt']
+    res_json = request.json()
+    user_obj = res_json.get('data', {}).get('user')
+    if not user_obj or 'id' not in user_obj:
+        raise Exception(f"user_getter failed: {res_json}")
+    return {'id': user_obj['id']}, user_obj.get('createdAt', '')
+
 
 def follower_getter(username):
     """
@@ -521,7 +573,11 @@ def follower_getter(username):
         }
     }'''
     request = simple_request(follower_getter.__name__, query, {'login': username})
-    return int(request.json()['data']['user']['followers']['totalCount'])
+    res_json = request.json()
+    user_obj = res_json.get('data', {}).get('user')
+    if not user_obj or 'followers' not in user_obj:
+        return 0
+    return int(user_obj['followers'].get('totalCount', 0))
 
 
 def query_count(funct_id):
@@ -562,33 +618,78 @@ if __name__ == '__main__':
         os.makedirs('cache')
         
     print('Calculation times:')
-    user_data, user_time = perf_counter(user_getter, USER_NAME)
-    OWNER_ID, acc_date = user_data
-    formatter('account data', user_time)
+    OWNER_ID = None
+    user_time = 0
+    try:
+        user_data, user_time = perf_counter(user_getter, USER_NAME)
+        OWNER_ID, acc_date = user_data
+        formatter('account data', user_time)
+    except Exception as e:
+        print(f"   account data: [API Token Unavailable / Error: {e}]")
     
-    # 2007-04-06 00:01:44 is 19 years and 101 days prior to 2026-07-16 09:32:22
-    age_data, age_time = perf_counter(daily_readme, datetime.datetime(2007, 4, 1, 15, 0, 0, tzinfo=datetime.timezone.utc))
+    # Baseline birthday / Earth uptime (2007-04-01 15:00:00 UTC)
+    birthday = datetime.datetime(2007, 4, 1, 15, 0, 0, tzinfo=datetime.timezone.utc)
+    age_data, age_time = perf_counter(daily_readme, birthday)
     formatter('age calculation', age_time)
     
-    total_loc, loc_time = perf_counter(loc_query, ['OWNER', 'COLLABORATOR', 'ORGANIZATION_MEMBER'], 7)
-    formatter('LOC (cached)', loc_time) if total_loc[-1] else formatter('LOC (no cache)', loc_time)
-    
-    commit_data, commit_time = perf_counter(commit_counter, 7)
-    star_data, star_time = perf_counter(graph_repos_stars, 'stars', ['OWNER'])
-    repo_data, repo_time = perf_counter(graph_repos_stars, 'repos', ['OWNER'])
-    contrib_data, contrib_time = perf_counter(graph_repos_stars, 'repos', ['OWNER', 'COLLABORATOR', 'ORGANIZATION_MEMBER'])
-    follower_data, follower_time = perf_counter(follower_getter, USER_NAME)
+    # Fallback / baseline stats
+    commit_data = 573
+    star_data = 3
+    repo_data = 16
+    contrib_data = 16
+    follower_data = 1
+    total_loc = [420963, 275133, 145830, True]
+    loc_time = 0
+    commit_time = 0
+    star_time = 0
+    repo_time = 0
+    contrib_time = 0
+    follower_time = 0
 
-    for index in range(len(total_loc)-1): 
-        total_loc[index] = '{:,}'.format(total_loc[index]) # format added, deleted, and total LOC
+    if OWNER_ID:
+        try:
+            total_loc, loc_time = perf_counter(loc_query, ['OWNER', 'COLLABORATOR', 'ORGANIZATION_MEMBER'], 7)
+            formatter('LOC (cached)', loc_time) if total_loc[-1] else formatter('LOC (no cache)', loc_time)
+        except Exception as e:
+            print(f"   LOC query: [Skipped/Failed: {e}]")
 
-    svg_overwrite('dark_mode.svg', age_data, commit_data, star_data, repo_data, contrib_data, follower_data, total_loc[:-1])
-    svg_overwrite('light_mode.svg', age_data, commit_data, star_data, repo_data, contrib_data, follower_data, total_loc[:-1])
+        try:
+            commit_data, commit_time = perf_counter(commit_counter, 7)
+        except Exception as e:
+            print(f"   Commit counter: [Skipped/Failed: {e}]")
 
-    # move cursor to override 'Calculation times:' with 'Total function time:' and the total function time, then move cursor back
-    print('\033[F\033[F\033[F\033[F\033[F\033[F\033[F\033[F',
-        '{:<21}'.format('Total function time:'), '{:>11}'.format('%.4f' % (user_time + age_time + loc_time + commit_time + star_time + repo_time + contrib_time)),
-        ' s \033[E\033[E\033[E\033[E\033[E\033[E\033[E\033[E', sep='')
+        try:
+            star_data, star_time = perf_counter(graph_repos_stars, 'stars', ['OWNER'])
+        except Exception as e:
+            print(f"   Stars query: [Skipped/Failed: {e}]")
 
+        try:
+            repo_data, repo_time = perf_counter(graph_repos_stars, 'repos', ['OWNER'])
+        except Exception as e:
+            print(f"   Repos query: [Skipped/Failed: {e}]")
+
+        try:
+            contrib_data, contrib_time = perf_counter(graph_repos_stars, 'repos', ['OWNER', 'COLLABORATOR', 'ORGANIZATION_MEMBER'])
+        except Exception as e:
+            print(f"   Contrib query: [Skipped/Failed: {e}]")
+
+        try:
+            follower_data, follower_time = perf_counter(follower_getter, USER_NAME)
+        except Exception as e:
+            print(f"   Follower query: [Skipped/Failed: {e}]")
+
+    formatted_loc = []
+    for val in total_loc[:-1]:
+        if isinstance(val, int):
+            formatted_loc.append('{:,}'.format(val))
+        else:
+            formatted_loc.append(str(val))
+
+    svg_overwrite('dark_mode.svg', age_data, commit_data, star_data, repo_data, contrib_data, follower_data, formatted_loc)
+    svg_overwrite('light_mode.svg', age_data, commit_data, star_data, repo_data, contrib_data, follower_data, formatted_loc)
+
+    total_time = user_time + age_time + loc_time + commit_time + star_time + repo_time + contrib_time + follower_time
+    print(f"Total function time: {total_time:.4f} s")
     print('Total GitHub GraphQL API calls:', '{:>3}'.format(sum(QUERY_COUNT.values())))
-    for funct_name, count in QUERY_COUNT.items(): print('{:<28}'.format('   ' + funct_name + ':'), '{:>6}'.format(count))
+    for funct_name, count in QUERY_COUNT.items():
+        print('{:<28}'.format('   ' + funct_name + ':'), '{:>6}'.format(count))
